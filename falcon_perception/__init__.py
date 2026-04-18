@@ -306,60 +306,6 @@ def build_prompt_for_task(query: str, task: str) -> str:
         return f"<|image|>{query}"
 
 
-def load_from_hf_export_mlx(
-    *,
-    hf_model_id: str | None = None,
-    hf_revision: str = "main",
-    hf_local_dir: str | None = None,
-    dtype: str = "float16",
-) -> tuple[Any, Any, "ModelArgs"]:
-    """Load model for the MLX backend from a HuggingFace export.
-
-    Uses ``mx.load`` for safetensors + on-the-fly weight conversion
-    (Conv2d transpose, RoPE complex->sin/cos).
-
-    Returns ``(model, tokenizer, model_args)``.
-    """
-    import mlx.core as mx
-    from huggingface_hub import snapshot_download
-
-    from falcon_perception.mlx.convert import load_mlx_weights
-    from falcon_perception.mlx.model import FalconPerception as FalconPerceptionMLX
-
-    if not (hf_local_dir or hf_model_id):
-        raise ValueError("Provide hf_local_dir or hf_model_id")
-
-    print("Loading MLX model from Hugging Face Hub ...")
-    export_dir = Path(hf_local_dir) if hf_local_dir else Path(
-        snapshot_download(
-            repo_id=hf_model_id or PERCEPTION_MODEL_ID,
-            repo_type="model",
-            revision=hf_revision,
-        )
-    )
-
-    tokenizer = get_tokenizer(str(export_dir))
-
-    variant = _detect_variant(export_dir)
-
-    model_args = get_model_args(variant)
-    model_args.update(tokenizer)
-
-    weights = load_mlx_weights(str(export_dir / "model.safetensors"))
-    model = FalconPerceptionMLX(model_args)
-    model.load_weights(weights, strict=False)
-
-    dtype_map = {"float16": mx.float16, "bfloat16": mx.bfloat16, "float32": mx.float32}
-    mx_dtype = dtype_map.get(dtype, mx.float16)
-    from mlx.utils import tree_map
-    casted = tree_map(lambda x: x.astype(mx_dtype), model.parameters())
-    model.update(casted)
-
-    print(f"  Variant: {variant} (perception_heads={model_args.perception_heads}, do_segmentation={model_args.do_segmentation})")
-    print(f"  MLX model ready (dtype={dtype}).\n")
-    return model, tokenizer, model_args
-
-
 def load_and_prepare_model(
     *,
     hf_model_id: str | None = None,
@@ -368,28 +314,11 @@ def load_and_prepare_model(
     device: str | None = None,
     dtype: str = "float32",
     compile: bool = True,
-    backend: str = "torch",
 ) -> tuple[Any, Any, "ModelArgs"]:
     """Load, move to device, and optionally compile the model.
 
-    Combines :func:`load_from_hf_export`, ``model.to()``, and
-    ``model.compile()`` — the shared boilerplate used by every ``run_*.py``
-    script.
-
-    Args:
-        backend: ``"torch"`` (default) or ``"mlx"`` for Apple Silicon.
-
     Returns ``(model, tokenizer, model_args)``.
     """
-    if backend == "mlx":
-        dtype_str = dtype if isinstance(dtype, str) else "float16"
-        return load_from_hf_export_mlx(
-            hf_model_id=hf_model_id,
-            hf_revision=hf_revision,
-            hf_local_dir=hf_local_dir,
-            dtype=dtype_str,
-        )
-
     import torch
 
     model, tokenizer, model_args = load_from_hf_export(
